@@ -16,20 +16,22 @@ use std::ffi::{CStr, CString};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem::MaybeUninit;
 use std::ptr;
-use time::{clockid_t, timespec_t, timeval_t};
+use time::{clockid_t, itimerspec_t, timespec_t, timeval_t};
 use util::log::{self, LevelFilter};
 use util::mem_util::from_user::*;
 
 use crate::exception::do_handle_exception;
 use crate::fs::{
-    do_access, do_chdir, do_chmod, do_chown, do_close, do_dup, do_dup2, do_dup3, do_eventfd,
-    do_eventfd2, do_faccessat, do_fallocate, do_fchmod, do_fchmodat, do_fchown, do_fchownat,
-    do_fcntl, do_fdatasync, do_fstat, do_fstatat, do_fstatfs, do_fsync, do_ftruncate, do_getcwd,
-    do_getdents, do_getdents64, do_ioctl, do_lchown, do_link, do_linkat, do_lseek, do_lstat,
-    do_mkdir, do_mkdirat, do_mount_rootfs, do_open, do_openat, do_pipe, do_pipe2, do_pread,
-    do_pwrite, do_read, do_readlink, do_readlinkat, do_readv, do_rename, do_renameat, do_rmdir,
-    do_sendfile, do_stat, do_statfs, do_symlink, do_symlinkat, do_sync, do_truncate, do_unlink,
-    do_unlinkat, do_write, do_writev, iovec_t, File, FileDesc, FileRef, HostStdioFds, Stat, Statfs,
+    do_access, do_chdir, do_chmod, do_chown, do_close, do_creat, do_dup, do_dup2, do_dup3,
+    do_eventfd, do_eventfd2, do_faccessat, do_fallocate, do_fchdir, do_fchmod, do_fchmodat,
+    do_fchown, do_fchownat, do_fcntl, do_fdatasync, do_fstat, do_fstatat, do_fstatfs, do_fsync,
+    do_ftruncate, do_getcwd, do_getdents, do_getdents64, do_ioctl, do_lchown, do_link, do_linkat,
+    do_lseek, do_lstat, do_mkdir, do_mkdirat, do_mount_rootfs, do_open, do_openat, do_pipe,
+    do_pipe2, do_pread, do_pwrite, do_read, do_readlink, do_readlinkat, do_readv, do_rename,
+    do_renameat, do_rmdir, do_sendfile, do_stat, do_statfs, do_symlink, do_symlinkat, do_sync,
+    do_timerfd_create, do_timerfd_gettime, do_timerfd_settime, do_truncate, do_umask, do_unlink,
+    do_unlinkat, do_write, do_writev, iovec_t, AsTimer, File, FileDesc, FileRef, HostStdioFds,
+    Stat, Statfs,
 };
 use crate::interrupt::{do_handle_interrupt, sgx_interrupt_info_t};
 use crate::misc::{resource_t, rlimit_t, sysinfo_t, utsname_t};
@@ -40,10 +42,11 @@ use crate::net::{
     do_shutdown, do_socket, do_socketpair, mmsghdr, msghdr, msghdr_mut,
 };
 use crate::process::{
-    do_arch_prctl, do_clone, do_execve, do_exit, do_exit_group, do_futex, do_getegid, do_geteuid,
-    do_getgid, do_getgroups, do_getpgid, do_getpid, do_getppid, do_gettid, do_getuid, do_prctl,
-    do_set_tid_address, do_spawn_for_glibc, do_spawn_for_musl, do_wait4, pid_t, posix_spawnattr_t,
-    FdOp, SpawnFileActions, ThreadStatus,
+    do_arch_prctl, do_clone, do_execve, do_exit, do_exit_group, do_futex, do_get_robust_list,
+    do_getegid, do_geteuid, do_getgid, do_getgroups, do_getpgid, do_getpgrp, do_getpid, do_getppid,
+    do_gettid, do_getuid, do_prctl, do_set_robust_list, do_set_tid_address, do_setpgid,
+    do_spawn_for_glibc, do_spawn_for_musl, do_vfork, do_wait4, pid_t, posix_spawnattr_t, FdOp,
+    RobustListHead, SpawnFileActions, ThreadStatus,
 };
 use crate::sched::{do_getcpu, do_sched_getaffinity, do_sched_setaffinity, do_sched_yield};
 use crate::signal::{
@@ -87,7 +90,7 @@ macro_rules! process_syscall_table_with_callback {
             // TODO: Unify the use of C types. For example, u8 or i8 or char_c for C string?
             (Read = 0) => do_read(fd: FileDesc, buf: *mut u8, size: usize),
             (Write = 1) => do_write(fd: FileDesc, buf: *const u8, size: usize),
-            (Open = 2) => do_open(path: *const i8, flags: u32, mode: u32),
+            (Open = 2) => do_open(path: *const i8, flags: u32, mode: u16),
             (Close = 3) => do_close(fd: FileDesc),
             (Stat = 4) => do_stat(path: *const i8, stat_buf: *mut Stat),
             (Fstat = 5) => do_fstat(fd: FileDesc, stat_buf: *mut Stat),
@@ -143,8 +146,8 @@ macro_rules! process_syscall_table_with_callback {
             (Getsockopt = 55) => do_getsockopt(fd: c_int, level: c_int, optname: c_int, optval: *mut c_void, optlen: *mut libc::socklen_t),
             (Clone = 56) => do_clone(flags: u32, stack_addr: usize, ptid: *mut pid_t, ctid: *mut pid_t, new_tls: usize),
             (Fork = 57) => handle_unsupported(),
-            (Vfork = 58) => handle_unsupported(),
-            (Execve = 59) => do_execve(path: *const i8, argv: *const *const i8, envp: *const *const i8),
+            (Vfork = 58) => do_vfork(context: *mut CpuContext),
+            (Execve = 59) => do_execve(path: *const i8, argv: *const *const i8, envp: *const *const i8, context: *mut CpuContext),
             (Exit = 60) => do_exit(exit_status: i32),
             (Wait4 = 61) => do_wait4(pid: i32, _exit_status: *mut i32, options: u32),
             (Kill = 62) => do_kill(pid: i32, sig: c_int),
@@ -166,11 +169,11 @@ macro_rules! process_syscall_table_with_callback {
             (Getdents = 78) => do_getdents(fd: FileDesc, buf: *mut u8, buf_size: usize),
             (Getcwd = 79) => do_getcwd(buf: *mut u8, size: usize),
             (Chdir = 80) => do_chdir(path: *const i8),
-            (Fchdir = 81) => handle_unsupported(),
+            (Fchdir = 81) => do_fchdir(fd: FileDesc),
             (Rename = 82) => do_rename(oldpath: *const i8, newpath: *const i8),
-            (Mkdir = 83) => do_mkdir(path: *const i8, mode: usize),
+            (Mkdir = 83) => do_mkdir(path: *const i8, mode: u16),
             (Rmdir = 84) => do_rmdir(path: *const i8),
-            (Creat = 85) => handle_unsupported(),
+            (Creat = 85) => do_creat(path: *const i8, mode: u16),
             (Link = 86) => do_link(oldpath: *const i8, newpath: *const i8),
             (Unlink = 87) => do_unlink(path: *const i8),
             (Symlink = 88) => do_symlink(target: *const i8, link_path: *const i8),
@@ -180,7 +183,7 @@ macro_rules! process_syscall_table_with_callback {
             (Chown = 92) => do_chown(path: *const i8, uid: u32, gid: u32),
             (Fchown = 93) => do_fchown(fd: FileDesc, uid: u32, gid: u32),
             (Lchown = 94) => do_lchown(path: *const i8, uid: u32, gid: u32),
-            (Umask = 95) => handle_unsupported(),
+            (Umask = 95) => do_umask(mask: u16),
             (Gettimeofday = 96) => do_gettimeofday(tv_u: *mut timeval_t),
             (Getrlimit = 97) => handle_unsupported(),
             (Getrusage = 98) => handle_unsupported(),
@@ -194,9 +197,9 @@ macro_rules! process_syscall_table_with_callback {
             (Setgid = 106) => handle_unsupported(),
             (Geteuid = 107) => do_geteuid(),
             (Getegid = 108) => do_getegid(),
-            (Setpgid = 109) => handle_unsupported(),
+            (Setpgid = 109) => do_setpgid(pid: i32, pgid: i32),
             (Getppid = 110) => do_getppid(),
-            (Getpgrp = 111) => handle_unsupported(),
+            (Getpgrp = 111) => do_getpgrp(),
             (Setsid = 112) => handle_unsupported(),
             (Setreuid = 113) => handle_unsupported(),
             (Setregid = 114) => handle_unsupported(),
@@ -206,7 +209,7 @@ macro_rules! process_syscall_table_with_callback {
             (Getresuid = 118) => handle_unsupported(),
             (Setresgid = 119) => handle_unsupported(),
             (Getresgid = 120) => handle_unsupported(),
-            (Getpgid = 121) => do_getpgid(),
+            (Getpgid = 121) => do_getpgid(pid: i32),
             (Setfsuid = 122) => handle_unsupported(),
             (Setfsgid = 123) => handle_unsupported(),
             (Getsid = 124) => handle_unsupported(),
@@ -316,7 +319,7 @@ macro_rules! process_syscall_table_with_callback {
             (ClockGettime = 228) => do_clock_gettime(clockid: clockid_t, ts_u: *mut timespec_t),
             (ClockGetres = 229) => do_clock_getres(clockid: clockid_t, res_u: *mut timespec_t),
             (ClockNanosleep = 230) => handle_unsupported(),
-            (ExitGroup = 231) => do_exit_group(exit_status: i32),
+            (ExitGroup = 231) => do_exit_group(exit_status: i32, user_context: *mut CpuContext),
             (EpollWait = 232) => do_epoll_wait(epfd: c_int, events: *mut libc::epoll_event, maxevents: c_int, timeout: c_int),
             (EpollCtl = 233) => do_epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *const libc::epoll_event),
             (Tgkill = 234) => do_tgkill(pid: i32, tid: pid_t, sig: c_int),
@@ -342,8 +345,8 @@ macro_rules! process_syscall_table_with_callback {
             (InotifyAddWatch = 254) => handle_unsupported(),
             (InotifyRmWatch = 255) => handle_unsupported(),
             (MigratePages = 256) => handle_unsupported(),
-            (Openat = 257) => do_openat(dirfd: i32, path: *const i8, flags: u32, mode: u32),
-            (Mkdirat = 258) => do_mkdirat(dirfd: i32, path: *const i8, mode: usize),
+            (Openat = 257) => do_openat(dirfd: i32, path: *const i8, flags: u32, mode: u16),
+            (Mkdirat = 258) => do_mkdirat(dirfd: i32, path: *const i8, mode: u16),
             (Mknodat = 259) => handle_unsupported(),
             (Fchownat = 260) => do_fchownat(dirfd: i32, path: *const i8, uid: u32, gid: u32, flags: i32),
             (Futimesat = 261) => handle_unsupported(),
@@ -358,8 +361,8 @@ macro_rules! process_syscall_table_with_callback {
             (Pselect6 = 270) => handle_unsupported(),
             (Ppoll = 271) => handle_unsupported(),
             (Unshare = 272) => handle_unsupported(),
-            (SetRobustList = 273) => handle_unsupported(),
-            (GetRobustList = 274) => handle_unsupported(),
+            (SetRobustList = 273) => do_set_robust_list(list_head_ptr: *mut RobustListHead, len: usize),
+            (GetRobustList = 274) => do_get_robust_list(tid: pid_t, list_head_ptr_ptr: *mut *mut RobustListHead, len_ptr: *mut usize),
             (Splice = 275) => handle_unsupported(),
             (Tee = 276) => handle_unsupported(),
             (SyncFileRange = 277) => handle_unsupported(),
@@ -368,11 +371,11 @@ macro_rules! process_syscall_table_with_callback {
             (Utimensat = 280) => handle_unsupported(),
             (EpollPwait = 281) => do_epoll_pwait(epfd: c_int, events: *mut libc::epoll_event, maxevents: c_int, timeout: c_int, sigmask: *const usize),
             (Signalfd = 282) => handle_unsupported(),
-            (TimerfdCreate = 283) => handle_unsupported(),
+            (TimerfdCreate = 283) => do_timerfd_create(clockid: clockid_t, flags: i32 ),
             (Eventfd = 284) => do_eventfd(init_val: u32),
             (Fallocate = 285) => do_fallocate(fd: FileDesc, mode: u32, offset: off_t, len: off_t),
-            (TimerfdSettime = 286) => handle_unsupported(),
-            (TimerfdGettime = 287) => handle_unsupported(),
+            (TimerfdSettime = 286) => do_timerfd_settime(fd: FileDesc, flags: i32, new_value: *const itimerspec_t, old_value: *mut itimerspec_t),
+            (TimerfdGettime = 287) => do_timerfd_gettime(fd: FileDesc, curr_value: *mut itimerspec_t),
             (Accept4 = 288) => do_accept4(fd: c_int, addr: *mut libc::sockaddr, addr_len: *mut libc::socklen_t, flags: c_int),
             (Signalfd4 = 289) => handle_unsupported(),
             (Eventfd2 = 290) => do_eventfd2(init_val: u32, flags: i32),
@@ -628,6 +631,16 @@ fn do_syscall(user_context: &mut CpuContext) {
         // need to modify it
         if syscall_num == SyscallNum::RtSigreturn {
             syscall.args[0] = user_context as *mut _ as isize;
+        } else if syscall_num == SyscallNum::Vfork {
+            syscall.args[0] = user_context as *mut _ as isize;
+        } else if syscall_num == SyscallNum::Execve {
+            // syscall.args[0] == path
+            // syscall.args[1] == argv
+            // syscall.args[2] == envp
+            syscall.args[3] = user_context as *mut _ as isize;
+        } else if syscall_num == SyscallNum::ExitGroup {
+            // syscall.args[0] == status
+            syscall.args[1] = user_context as *mut _ as isize;
         } else if syscall_num == SyscallNum::HandleException {
             // syscall.args[0] == info
             // syscall.args[1] == fpregs

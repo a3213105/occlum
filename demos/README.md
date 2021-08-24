@@ -14,6 +14,7 @@ This set of demos shows how the Occlum toolchain can be used with different buil
 
 This set of demos shows how real-world apps can be easily run inside SGX enclaves with Occlum.
 
+* [bash](bash/): A demo of [Bash](https://www.gnu.org/software/bash/) shell script.
 * [cluster_serving](cluster_serving/): A demo of [Analytics Zoo Cluster Serving](https://analytics-zoo.github.io/master/#ClusterServingGuide/ProgrammingGuide/) inference solution.
 * [fish](fish/): A demo of [FISH](https://fishshell.com) shell script.
 * [flink](flink/): A demo of [Apache Flink](https://flink.apache.org).
@@ -25,7 +26,9 @@ This set of demos shows how real-world apps can be easily run inside SGX enclave
 * [redis](redis/): A demo of [Redis](https://redis.io).
 * [sofaboot](sofaboot/): A demo of [SOFABoot](https://github.com/sofastack/sofa-boot), an open source Java development framework based on Spring Boot.
 * [sqlite](sqlite/) A demo of [SQLite](https://www.sqlite.org) SQL database engine.
-* [tensorflow_lite](tensorflow_lite/): A demo and benchmark of [Tensorflow Lite](https://www.tensorflow.org/lite) inference engine.
+* [tensorflow](tensorflow/tensorflow_training): A demo of [TensorFlow](https://www.tensorflow.org/) MNIST classification training.
+* [tensorflow_lite](tensorflow_lite/): A demo and benchmark of [TensorFlow Lite](https://www.tensorflow.org/lite) inference engine.
+* [tensorflow_serving](tensorflow/tensorflow_serving): A demo of [TensorFlow Serving](https://github.com/tensorflow/serving) 
 * [vault](golang/vault/): A demo of [HashiCorp Vault](https://github.com/hashicorp/vault).
 * [xgboost](xgboost/): A demo of [XGBoost](https://xgboost.readthedocs.io/en/latest).
 

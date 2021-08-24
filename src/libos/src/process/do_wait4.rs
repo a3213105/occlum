@@ -1,7 +1,38 @@
+use super::pgrp::clean_pgrp_when_exit;
 use super::process::{ProcessFilter, ProcessInner};
 use super::wait::Waiter;
 use super::{table, ProcessRef, ProcessStatus};
 use crate::prelude::*;
+
+// Children process exits without parent calls wait4 should be reaped by Idle process in the end.
+// Without this, there might be memory leakage when exit.
+pub fn idle_reap_zombie_children() -> Result<()> {
+    let idle_ref = super::IDLE.process().clone();
+    let mut zombie_pids = Vec::new();
+    loop {
+        // This needs to acquire lock every time.
+        let mut idle_inner = idle_ref.inner();
+        let children = idle_inner.children().unwrap();
+        match children
+            .iter()
+            .find(|child| child.status() == ProcessStatus::Zombie)
+        {
+            Some(zombie_child) => {
+                // Reap one zombie each time.
+                let zombie_pid = zombie_child.pid();
+                let exit_status = free_zombie_child(idle_inner, zombie_pid);
+                zombie_pids.push(zombie_pid);
+            }
+            None => {
+                // None zombie child, just return
+                break;
+            }
+        }
+    }
+
+    info!("Idle process reaps zombie children pid = {:?}", zombie_pids);
+    return Ok(());
+}
 
 pub fn do_wait4(child_filter: &ProcessFilter, options: WaitOptions) -> Result<(pid_t, i32)> {
     // Lock the process early to ensure that we do not miss any changes in
@@ -71,6 +102,9 @@ fn free_zombie_child(mut parent_inner: SgxMutexGuard<ProcessInner>, zombie_pid: 
 
     let zombie = parent_inner.remove_zombie_child(zombie_pid);
     debug_assert!(zombie.status() == ProcessStatus::Zombie);
+
+    // This has to be done after removing from process table to make sure process.pgid() can work.
+    clean_pgrp_when_exit(&zombie);
 
     let zombie_inner = zombie.inner();
     zombie_inner.term_status().unwrap().as_u32() as i32

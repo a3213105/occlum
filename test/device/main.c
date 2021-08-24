@@ -1,9 +1,11 @@
+#define _GNU_SOURCE
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "test_fs.h"
 
 // ============================================================================
@@ -143,6 +145,49 @@ int test_dev_shm() {
     return 0;
 }
 
+int test_dev_fd() {
+    char *file_path = "/root/hello_world";
+    char *greetings = "hello";
+    int fd = open(file_path, O_RDWR | O_CREAT | O_TRUNC, 00666);
+    if (fd < 0) {
+        THROW_ERROR("failed to open a file to write");
+    }
+
+    // Generate dev_fd path
+    char dev_fd_path[20] = "/dev/fd/";
+    char *fd_str = calloc(1, 4); // 4 bytes would be enough here.
+    if (fd_str == NULL) {
+        THROW_ERROR("calloc failed");
+    }
+    if (asprintf(&fd_str, "%d", fd) < 0) {
+        THROW_ERROR("failed to asprintf");
+    }
+    strcat(dev_fd_path, fd_str);
+    int dev_fd = open(dev_fd_path, O_WRONLY, 0666);
+    if (dev_fd < 0) {
+        THROW_ERROR("failed to open %s", dev_fd_path);
+    }
+
+    int len = write(dev_fd, greetings, strlen(greetings));
+    if (len < 0) {
+        THROW_ERROR("failed to write to %s", dev_fd_path);
+    }
+
+    char buf[10] = {0};
+    len = read(fd, buf, len);
+    if (len < 0) {
+        THROW_ERROR("failed to read from %s", file_path);
+    }
+
+    if (strcmp(buf, greetings)) {
+        THROW_ERROR("file content is wrong");
+    }
+
+    free(fd_str);
+    close(dev_fd);
+    close(fd);
+    return 0;
+}
 // ============================================================================
 // Test suite
 // ============================================================================
@@ -156,6 +201,7 @@ static test_case_t test_cases[] = {
     TEST_CASE(test_dev_urandom_poll),
     TEST_CASE(test_dev_arandom),
     TEST_CASE(test_dev_shm),
+    TEST_CASE(test_dev_fd),
 };
 
 int main() {

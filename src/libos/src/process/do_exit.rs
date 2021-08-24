@@ -2,15 +2,24 @@ use crate::signal::constants::*;
 use std::intrinsics::atomic_store;
 
 use super::do_futex::futex_wake;
+use super::do_vfork::{is_vforked_child_process, vfork_return_to_parent};
+use super::pgrp::clean_pgrp_when_exit;
 use super::process::{Process, ProcessFilter};
 use super::{table, ProcessRef, TermStatus, ThreadRef, ThreadStatus};
 use crate::prelude::*;
 use crate::signal::{KernelSignal, SigNum};
+use crate::syscall::CpuContext;
 
-pub fn do_exit_group(status: i32) {
-    let term_status = TermStatus::Exited(status as u8);
-    current!().process().force_exit(term_status);
-    exit_thread(term_status);
+pub fn do_exit_group(status: i32, curr_user_ctxt: &mut CpuContext) -> Result<isize> {
+    if is_vforked_child_process() {
+        let current = current!();
+        return vfork_return_to_parent(curr_user_ctxt as *mut _, &current);
+    } else {
+        let term_status = TermStatus::Exited(status as u8);
+        current!().process().force_exit(term_status);
+        exit_thread(term_status);
+        Ok(0)
+    }
 }
 
 pub fn do_exit(status: i32) {
@@ -43,6 +52,9 @@ fn exit_thread(term_status: TermStatus) {
         }
         futex_wake(ctid_ptr.as_ptr() as *const i32, 1);
     }
+
+    // Notify waiters that the owner of robust futex has died.
+    thread.wake_robust_list();
 
     // Keep the main thread's tid available as long as the process is not destroyed.
     // This is important as the user space may still attempt to access the main
@@ -99,6 +111,7 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus) {
         let main_tid = pid;
         table::del_thread(main_tid).expect("tid must be in the table");
         table::del_process(pid).expect("pid must be in the table");
+        clean_pgrp_when_exit(process);
 
         process_inner.exit(term_status, &idle_ref, &mut idle_inner);
         idle_inner.remove_zombie_child(pid);

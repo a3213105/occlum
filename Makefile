@@ -35,6 +35,7 @@ submodule: githooks
 	@# Try to apply the patches. If failed, check if the patches are already applied
 	cd deps/serde-json-sgx && git apply ../serde-json-sgx.patch >/dev/null 2>&1 || git apply ../serde-json-sgx.patch -R --check
 	cd deps/ringbuf && git apply ../ringbuf.patch >/dev/null 2>&1 || git apply ../ringbuf.patch -R --check
+	cd deps/resolv-conf && git apply ../resolv-conf.patch >/dev/null 2>&1 || git apply ../resolv-conf.patch -R --check
 
 	@# Enclaves used by tools are running in simulation mode by default to run faster.
 	@rm -rf build build_sim
@@ -87,7 +88,7 @@ install: minimal_sgx_libs
 
 	@echo "Installation is done."
 
-SGX_SDK=/opt/intel/sgxsdk
+SGX_SDK ?= /opt/intel/sgxsdk
 # Install minimum sgx-sdk set to support Occlum cmd execution in non-customized sgx-sdk environment
 minimal_sgx_libs: $(SGX_SDK)/lib64/libsgx_uae_service_sim.so $(SGX_SDK)/lib64/libsgx_quote_ex_sim.so
 	@echo "Install needed sgx-sdk tools ..."

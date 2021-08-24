@@ -2,12 +2,15 @@ use super::do_arch_prctl::ArchPrctlCode;
 use super::do_clone::CloneFlags;
 use super::do_exec::do_exec;
 use super::do_futex::{FutexFlags, FutexOp, FutexTimeout};
+use super::do_robust_list::RobustListHead;
 use super::do_spawn::FileAction;
 use super::do_wait4::WaitOptions;
+use super::pgrp::*;
 use super::prctl::PrctlCmd;
 use super::process::ProcessFilter;
 use super::spawn_attribute::{clone_spawn_atrributes_safely, posix_spawnattr_t, SpawnAttr};
 use crate::prelude::*;
+use crate::syscall::CpuContext;
 use crate::time::{timespec_t, ClockID};
 use crate::util::mem_util::from_user::*;
 use std::ptr::NonNull;
@@ -198,6 +201,9 @@ fn clone_file_actions_from_fa_safely(fa_ptr: *const SpawnFileActions) -> Result<
         let fa = unsafe { &*fa_ptr };
         let sa_ptr = fa.actions;
         let sa_len = fa.used as usize;
+        if (sa_ptr == std::ptr::null() && sa_len == 0) {
+            return Ok(file_actions);
+        }
         check_array(sa_ptr, sa_len)?;
         unsafe { std::slice::from_raw_parts(sa_ptr, sa_len) }
     };
@@ -336,10 +342,10 @@ pub fn do_exit(status: i32) -> Result<isize> {
     Ok(0)
 }
 
-pub fn do_exit_group(status: i32) -> Result<isize> {
+pub fn do_exit_group(status: i32, user_context: *mut CpuContext) -> Result<isize> {
     debug!("exit_group: {}", status);
-    super::do_exit::do_exit_group(status);
-    Ok(0)
+    let user_context = unsafe { &mut *user_context };
+    return super::do_exit::do_exit_group(status, user_context);
 }
 
 pub fn do_wait4(pid: i32, exit_status_ptr: *mut i32, options: u32) -> Result<isize> {
@@ -389,9 +395,42 @@ pub fn do_getppid() -> Result<isize> {
     Ok(ppid as isize)
 }
 
-pub fn do_getpgid() -> Result<isize> {
-    let pgid = super::do_getpid::do_getpgid();
+pub fn do_getpgrp() -> Result<isize> {
+    do_getpgid(0)
+}
+
+pub fn do_getpgid(pid: i32) -> Result<isize> {
+    if pid < 0 {
+        return_errno!(ESRCH, "process with negative pid is not found");
+    }
+
+    let real_pid = if pid == 0 {
+        do_getpid()? as pid_t
+    } else {
+        pid as pid_t
+    };
+    let pgid = super::pgrp::do_getpgid(real_pid)?;
     Ok(pgid as isize)
+}
+
+pub fn do_setpgid(pid: i32, pgid: i32) -> Result<isize> {
+    if pgid < 0 {
+        return_errno!(EINVAL, "pgid can't be negative");
+    }
+
+    let pid = pid as pid_t;
+    let pgid = pgid as pid_t;
+    // Pid should be the calling process or a child of the calling process.
+    let current_pid = current!().process().pid();
+    if pid != 0 && pid != current_pid && current!().process().inner().is_child_of(pid) == false {
+        return_errno!(ESRCH, "pid not calling process or child processes");
+    }
+
+    // When this function is calling, the process must be executing.
+    let is_executing = true;
+    let ret = super::pgrp::do_setpgid(pid, pgid, is_executing)?;
+
+    Ok(ret)
 }
 
 // TODO: implement uid, gid, euid, egid
@@ -431,7 +470,12 @@ pub fn do_getgroups(size: isize, buf_ptr: *mut u32) -> Result<isize> {
     }
 }
 
-pub fn do_execve(path: *const i8, argv: *const *const i8, envp: *const *const i8) -> Result<isize> {
+pub fn do_execve(
+    path: *const i8,
+    argv: *const *const i8,
+    envp: *const *const i8,
+    context: *mut CpuContext,
+) -> Result<isize> {
     let path = clone_cstring_safely(path)?.to_string_lossy().into_owned();
     let argv = clone_cstrings_safely(argv)?;
     let envp = clone_cstrings_safely(envp)?;
@@ -441,5 +485,28 @@ pub fn do_execve(path: *const i8, argv: *const *const i8, envp: *const *const i8
         path, argv, envp
     );
 
-    do_exec(&path, &argv, &envp, &current)
+    do_exec(&path, &argv, &envp, &current, context)
+}
+
+pub fn do_set_robust_list(list_head_ptr: *mut RobustListHead, len: usize) -> Result<isize> {
+    if !list_head_ptr.is_null() {
+        check_mut_ptr(list_head_ptr)?;
+    }
+    super::do_robust_list::do_set_robust_list(list_head_ptr, len)?;
+    Ok(0)
+}
+
+pub fn do_get_robust_list(
+    tid: pid_t,
+    list_head_ptr_ptr: *mut *mut RobustListHead,
+    len_ptr: *mut usize,
+) -> Result<isize> {
+    check_mut_ptr(list_head_ptr_ptr)?;
+    check_mut_ptr(len_ptr)?;
+    let list_head_ptr = super::do_robust_list::do_get_robust_list(tid)?;
+    unsafe {
+        list_head_ptr_ptr.write(list_head_ptr);
+        len_ptr.write(std::mem::size_of::<RobustListHead>());
+    }
+    Ok(0)
 }

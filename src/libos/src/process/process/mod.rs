@@ -1,7 +1,8 @@
 use std::fmt;
 
 use super::wait::WaitQueue;
-use super::{ForcedExitStatus, ProcessRef, TermStatus, ThreadRef};
+use super::{ForcedExitStatus, ProcessGrpRef, ProcessRef, TermStatus, ThreadRef};
+use crate::fs::FileMode;
 use crate::prelude::*;
 use crate::signal::{SigDispositions, SigNum, SigQueues};
 
@@ -17,7 +18,9 @@ pub struct Process {
     exec_path: String,
     // Mutable info
     parent: Option<RwLock<ProcessRef>>,
+    pgrp: RwLock<Option<ProcessGrpRef>>,
     inner: SgxMutex<ProcessInner>,
+    umask: RwLock<FileMode>,
     // Signal
     sig_dispositions: RwLock<SigDispositions>,
     sig_queues: RwLock<SigQueues>,
@@ -38,9 +41,8 @@ impl Process {
     }
 
     /// Get process group ID
-    // TODO: implement process group
     pub fn pgid(&self) -> pid_t {
-        self.pid
+        self.pgrp().pgid()
     }
 
     /// Get the parent process.
@@ -55,6 +57,29 @@ impl Process {
             .read()
             .unwrap()
             .clone()
+    }
+
+    /// Get the process group.
+    pub fn pgrp(&self) -> ProcessGrpRef {
+        self.pgrp
+            .read()
+            .unwrap()
+            .as_ref()
+            // Process must be assigned a process group
+            .unwrap()
+            .clone()
+    }
+
+    /// Update process group when setpgid is called
+    pub fn update_pgrp(&self, new_pgrp: ProcessGrpRef) {
+        let mut pgrp = self.pgrp.write().unwrap();
+        *pgrp = Some(new_pgrp);
+    }
+
+    /// Remove process group when process exit
+    pub fn remove_pgrp(&self) {
+        let mut pgrp = self.pgrp.write().unwrap();
+        *pgrp = None;
     }
 
     /// Get the main thread.
@@ -97,6 +122,19 @@ impl Process {
     /// Get the path of the executable
     pub fn exec_path(&self) -> &str {
         &self.exec_path
+    }
+
+    /// Get the file mode creation mask
+    pub fn umask(&self) -> FileMode {
+        self.umask.read().unwrap().clone()
+    }
+
+    /// Set the file mode creation mask, return the previous value
+    pub fn set_umask(&self, new_mask: FileMode) -> FileMode {
+        let mut mask = self.umask.write().unwrap();
+        let old_mask = mask.clone();
+        *mask = new_mask;
+        old_mask
     }
 
     /// Get the signal queues for process-directed signals.
@@ -182,6 +220,13 @@ impl ProcessInner {
 
     pub fn num_children(&mut self) -> usize {
         self.children().map(|children| children.len()).unwrap_or(0)
+    }
+
+    pub fn is_child_of(&self, pid: pid_t) -> bool {
+        match self.children() {
+            Some(children) => children.iter().find(|&child| child.pid() == pid).is_some(),
+            None => false,
+        }
     }
 
     pub fn threads(&self) -> Option<&Vec<ThreadRef>> {
@@ -294,6 +339,7 @@ impl fmt::Debug for Process {
             .field("pid", &self.pid())
             .field("exec_path", &self.exec_path())
             .field("ppid", &ppid)
+            .field("pgid", &self.pgid())
             .field("inner", &self.inner())
             .finish()
     }

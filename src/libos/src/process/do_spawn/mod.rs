@@ -10,9 +10,10 @@ use super::task::Task;
 use super::thread::{ThreadId, ThreadName};
 use super::{table, task, ProcessRef, ThreadRef};
 use crate::fs::{
-    CreationFlags, File, FileDesc, FileTable, FsView, HostStdioFds, StdinFile, StdoutFile,
+    CreationFlags, File, FileDesc, FileMode, FileTable, FsView, HostStdioFds, StdinFile, StdoutFile,
 };
 use crate::prelude::*;
+use crate::process::pgrp::{get_spawn_attribute_pgrp, update_pgrp_for_new_process};
 use crate::vm::ProcessVM;
 
 mod aux_vec;
@@ -117,6 +118,7 @@ fn new_process(
         host_stdio_fds,
         current_ref,
         None,
+        None,
     )?;
     table::add_process(new_process_ref.clone());
     table::add_thread(new_process_ref.main_thread().unwrap());
@@ -130,6 +132,8 @@ pub fn new_process_for_exec(
     argv: &[CString],
     envp: &[CString],
     current_ref: &ThreadRef,
+    reuse_tid: Option<ThreadId>,
+    parent_process: Option<ProcessRef>,
 ) -> Result<ProcessRef> {
     let tid = ThreadId {
         tid: current_ref.process().pid() as u32,
@@ -142,7 +146,8 @@ pub fn new_process_for_exec(
         None,
         None,
         current_ref,
-        Some(tid),
+        reuse_tid,
+        parent_process,
     )?;
 
     Ok(new_process_ref)
@@ -157,6 +162,7 @@ fn new_process_common(
     host_stdio_fds: Option<&HostStdioFds>,
     current_ref: &ThreadRef,
     reuse_tid: Option<ThreadId>,
+    parent_process: Option<ProcessRef>,
 ) -> Result<ProcessRef> {
     let mut argv = argv.clone().to_vec();
     let (is_script, elf_inode, mut elf_buf, elf_header) =
@@ -269,32 +275,49 @@ fn new_process_common(
         }
         trace!("new process sig_dispositions = {:?}", sig_dispositions);
 
+        // Check for process group spawn attribute. This must be done before building the new process.
+        let new_pgid = get_spawn_attribute_pgrp(spawn_attributes)?;
+        // Use parent process's process group by default.
+        let pgrp_ref = process_ref.pgrp();
+
         // Make the default thread name to be the process's corresponding elf file name
         let elf_name = elf_path.rsplit('/').collect::<Vec<&str>>()[0];
         let thread_name = ThreadName::new(elf_name);
 
-        let mut parent;
         let mut process_builder = ProcessBuilder::new();
-        if reuse_tid.is_some() {
-            process_builder = process_builder.tid(reuse_tid.unwrap());
-            parent = current!().process().parent();
-        } else {
-            parent = process_ref;
+
+        // Use specified tid if any
+        if let Some(reuse_tid) = reuse_tid {
+            process_builder = process_builder.tid(reuse_tid);
         }
 
-        process_builder
+        // Use specified parent process if any
+        let parent = if let Some(parent) = parent_process {
+            parent
+        } else {
+            process_ref
+        };
+
+        let new_process = process_builder
             .vm(vm_ref)
             .exec_path(&elf_path)
+            .umask(parent.umask())
             .parent(parent)
             .task(task)
             .sched(sched_ref)
             .rlimits(rlimit_ref)
             .fs(fs_ref)
+            .pgrp(pgrp_ref)
             .files(files_ref)
             .sig_mask(sig_mask)
             .name(thread_name)
             .sig_dispositions(sig_dispositions)
-            .build()?
+            .build()?;
+
+        // This is done here becuase if we want to create a new process group, we must have a new process first.
+        // So we can't set "pgrp" during the build above.
+        update_pgrp_for_new_process(new_process.clone(), new_pgid)?;
+        new_process
     };
 
     info!(
@@ -339,12 +362,11 @@ fn init_files(
                     oflag,
                     fd,
                 } => {
-                    let file_ref =
-                        current_ref
-                            .fs()
-                            .read()
-                            .unwrap()
-                            .open_file(path.as_str(), oflag, mode)?;
+                    let file_ref = current_ref.fs().read().unwrap().open_file(
+                        path.as_str(),
+                        oflag,
+                        FileMode::from_bits_truncate(mode as u16),
+                    )?;
                     let creation_flags = CreationFlags::from_bits_truncate(oflag);
                     cloned_file_table.put_at(fd, file_ref, creation_flags.must_close_on_spawn());
                 }

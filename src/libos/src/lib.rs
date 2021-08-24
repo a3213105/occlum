@@ -20,6 +20,7 @@
 #![feature(get_mut_unchecked)]
 // for std::hint::black_box
 #![feature(test)]
+#![feature(atomic_from_mut)]
 
 #[macro_use]
 extern crate alloc;
@@ -53,6 +54,7 @@ extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate memoffset;
+extern crate resolv_conf;
 
 use sgx_trts::libc;
 use sgx_types::*;

@@ -134,10 +134,10 @@ jobs:
       run: docker exec fish_test bash -c "cd /root/occlum/demos/fish && ./download_and_build.sh"
 
     - name: Run Fish test
-      run: docker exec fish_test bash -c "cd /root/occlum/demos/fish && SGX_MODE=SIM ./run_fish_test.sh" &
+      run: docker exec fish_test bash -c "cd /root/occlum/demos/fish && SGX_MODE=SIM ./run_fish_test.sh"
 
     - name: Run Fish process rlimit test
-      run: docker exec fish_test bash -c "cd /root/occlum/demos/fish && SGX_MODE=SIM ./run_per_process_config_test.sh" &
+      run: docker exec fish_test bash -c "cd /root/occlum/demos/fish && SGX_MODE=SIM ./run_per_process_config_test.sh"
 
   Bazel_test:
     runs-on: ubuntu-18.04
@@ -326,7 +326,7 @@ jobs:
       run: echo "OCCLUM_VERSION=$(grep "Version =" src/pal/include/occlum_version.h |  awk '{print $4}')" >> $GITHUB_ENV
 
     - name: Create container
-      run: docker run -itd --name=pytorch_test -v $GITHUB_WORKSPACE:/root/occlum occlum/occlum:${{ env.OCCLUM_VERSION }}-ubuntu18.04
+      run: docker run -itd --cpuset-cpus="0" --name=pytorch_test -v $GITHUB_WORKSPACE:/root/occlum occlum/occlum:${{ env.OCCLUM_VERSION }}-ubuntu18.04
 
     - name: Build dependencies
       run: docker exec pytorch_test bash -c "cd /root/occlum; make submodule"
@@ -350,6 +350,32 @@ jobs:
         else
           exit 1
         fi
+
+
+  Tensorflow_test:
+    runs-on: ubuntu-18.04
+    steps:
+    - uses: actions/checkout@v1
+      with:
+        submodules: true
+
+    - name: Get occlum version
+      run: echo "OCCLUM_VERSION=$(grep "Version =" src/pal/include/occlum_version.h |  awk '{print $4}')" >> $GITHUB_ENV
+
+    - name: Create container
+      run: docker run -itd --cpuset-cpus="0" --name=tensorflow_test -v $GITHUB_WORKSPACE:/root/occlum occlum/occlum:${{ env.OCCLUM_VERSION }}-ubuntu18.04
+
+    - name: Build dependencies
+      run: docker exec tensorflow_test bash -c "cd /root/occlum; make submodule"
+
+    - name: Make install
+      run: docker exec tensorflow_test bash -c "source /opt/intel/sgxsdk/environment; cd /root/occlum; OCCLUM_RELEASE_BUILD=1 make install"
+
+    - name: Build python and tensorflow
+      run: docker exec tensorflow_test bash -c "cd /root/occlum/demos/tensorflow/tensorflow_training; ./install_python_with_conda.sh"
+
+    - name: Run tensorflow test
+      run: docker exec tensorflow_test bash -c "cd /root/occlum/demos/tensorflow/tensorflow_training; SGX_MODE=SIM ./run_tensorflow_on_occlum.sh 2>&1 | tee /root/occlum/log"
 
 
 # Below tests needs test image to run faster
@@ -435,7 +461,7 @@ jobs:
       run: echo "OCCLUM_VERSION=$(grep "Version =" src/pal/include/occlum_version.h |  awk '{print $4}')" >> $GITHUB_ENV
 
     - name: Create container
-      run: docker run -itd --name=python_glibc_support_test -v $GITHUB_WORKSPACE:/root/occlum occlum/occlum:${{ env.OCCLUM_VERSION }}-ubuntu18.04
+      run: docker run -itd --cpuset-cpus="0" --name=python_glibc_support_test -v $GITHUB_WORKSPACE:/root/occlum occlum/occlum:${{ env.OCCLUM_VERSION }}-ubuntu18.04
 
     - name: Build dependencies
       run: docker exec python_glibc_support_test bash -c "cd /root/occlum; make submodule"
@@ -640,3 +666,58 @@ jobs:
       run: |
         sleep ${{ env.nap_time }};
         docker exec sofaboot_test bash -c "curl http://localhost:8080/actuator/versions"
+
+  Bash_test:
+    runs-on: ubuntu-18.04
+    steps:
+    - uses: actions/checkout@v1
+      with:
+        submodules: true
+
+    - name: Get occlum version
+      run: echo "OCCLUM_VERSION=$(grep "Version =" src/pal/include/occlum_version.h |  awk '{print $4}')" >> $GITHUB_ENV
+
+    - name: Create container
+      run: docker run -itd --name=bash_test -v $GITHUB_WORKSPACE:/root/occlum occlum/occlum:${{ env.OCCLUM_VERSION }}-ubuntu18.04
+
+    - name: Build dependencies
+      run: docker exec bash_test bash -c "cd /root/occlum; make submodule"
+
+    - name: Make install
+      run: docker exec bash_test bash -c "source /opt/intel/sgxsdk/environment; cd /root/occlum; OCCLUM_RELEASE_BUILD=1 make install"
+
+    - name: Build Bash dependencies
+      run: docker exec bash_test bash -c "cd /root/occlum/demos/bash && ./prepare_bash_demo.sh"
+
+    - name: Run Bash test
+      run: docker exec bash_test bash -c "cd /root/occlum/demos/bash && SGX_MODE=SIM ./run_bash_demo.sh"
+
+  # Tensorflow_serving requires binary tensorflow_serving PIC, here we compile tensorflow_model_server before workflow
+  tensorflow_serving_test:
+    runs-on: ubuntu-18.04
+    steps:
+    - uses: actions/checkout@v1
+      with:
+        submodules: true
+    - name: Create container
+      run: docker run -itd --name=tf_serving_test -v $GITHUB_WORKSPACE:/root/occlum occlumbackup/occlum:latest-ubuntu18.04-tf_serving
+
+    - name: Build dependencies
+      run: docker exec tf_serving_test bash -c "cd /root/occlum; make submodule"
+
+    - name: Make install
+      run: docker exec tf_serving_test bash -c "source /opt/intel/sgxsdk/environment; cd /root/occlum; OCCLUM_RELEASE_BUILD=1 make install"
+    
+    - name: Move tensorflow_model_server
+      run: docker exec tf_serving_test bash -c "mv /root/tensorflow_model_server /root/occlum/demos/tensorflow/tensorflow_serving"
+
+    - name: Set up environment
+      run: docker exec tf_serving_test bash -c "cd /root/occlum/demos/tensorflow/tensorflow_serving; ./prepare_model_and_env.sh"
+
+    - name: Run tf_serving server
+      run: docker exec tf_serving_test bash -c "cd /root/occlum/demos/tensorflow/tensorflow_serving; SGX_MODE=SIM ./run_occlum_tf_serving.sh"
+
+    - name: Run tf_serving client
+      run: |
+        sleep 120;
+        docker exec tf_serving_test bash -c "cd /root/occlum/demos/tensorflow/tensorflow_serving/client; ./prepare_client_env.sh; ./benchmark.sh python3 localhost:8500 ../ssl_configure/server.crt"

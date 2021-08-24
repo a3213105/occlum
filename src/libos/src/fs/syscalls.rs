@@ -1,10 +1,12 @@
 use super::event_file::EventCreationFlags;
 use super::file_ops;
 use super::file_ops::{
-    AccessibilityCheckFlags, AccessibilityCheckMode, ChownFlags, FcntlCmd, FsPath, LinkFlags,
-    StatFlags, UnlinkFlags, AT_FDCWD,
+    get_abs_path_by_fd, AccessibilityCheckFlags, AccessibilityCheckMode, ChownFlags, FcntlCmd,
+    FsPath, LinkFlags, StatFlags, UnlinkFlags, AT_FDCWD,
 };
 use super::fs_ops;
+use super::time::{clockid_t, itimerspec_t, ClockID};
+use super::timer_file::{TimerCreationFlags, TimerSetFlags};
 use super::*;
 use util::mem_util::from_user;
 
@@ -35,17 +37,90 @@ pub fn do_eventfd2(init_val: u32, flags: i32) -> Result<isize> {
     Ok(fd as isize)
 }
 
-pub fn do_open(path: *const i8, flags: u32, mode: u32) -> Result<isize> {
+pub fn do_timerfd_create(clockid: clockid_t, flags: i32) -> Result<isize> {
+    debug!("timerfd: clockid {}, flags {} ", clockid, flags);
+
+    let clockid = ClockID::from_raw(clockid)?;
+    match clockid {
+        ClockID::CLOCK_REALTIME | ClockID::CLOCK_MONOTONIC => {}
+        _ => {
+            return_errno!(EINVAL, "invalid clockid");
+        }
+    }
+    let timer_create_flags =
+        TimerCreationFlags::from_bits(flags).ok_or_else(|| errno!(EINVAL, "invalid flags"))?;
+    let file_ref: Arc<dyn File> = {
+        let timer = TimerFile::new(clockid, timer_create_flags)?;
+        Arc::new(timer)
+    };
+
+    let fd = current!().add_file(
+        file_ref,
+        timer_create_flags.contains(TimerCreationFlags::TFD_CLOEXEC),
+    );
+    Ok(fd as isize)
+}
+
+pub fn do_timerfd_settime(
+    fd: FileDesc,
+    flags: i32,
+    new_value_ptr: *const itimerspec_t,
+    old_value_ptr: *mut itimerspec_t,
+) -> Result<isize> {
+    from_user::check_ptr(new_value_ptr)?;
+    let new_value = itimerspec_t::from_raw_ptr(new_value_ptr)?;
+    let timer_set_flags =
+        TimerSetFlags::from_bits(flags).ok_or_else(|| errno!(EINVAL, "invalid flags"))?;
+
+    let current = current!();
+    let file = current.file(fd)?;
+    let timerfile = file.as_timer()?;
+    let old_value = timerfile.set_time(timer_set_flags, &new_value)?;
+    if !old_value_ptr.is_null() {
+        from_user::check_mut_ptr(old_value_ptr)?;
+        unsafe {
+            old_value_ptr.write(old_value);
+        }
+    }
+    Ok(0)
+}
+
+pub fn do_timerfd_gettime(fd: FileDesc, curr_value_ptr: *mut itimerspec_t) -> Result<isize> {
+    from_user::check_mut_ptr(curr_value_ptr)?;
+    let current = current!();
+    let file = current.file(fd)?;
+    let timerfile = file.as_timer()?;
+    let curr_value = timerfile.time()?;
+    unsafe {
+        curr_value_ptr.write(curr_value);
+    }
+    Ok(0)
+}
+
+pub fn do_creat(path: *const i8, mode: u16) -> Result<isize> {
+    let flags =
+        AccessMode::O_WRONLY as u32 | (CreationFlags::O_CREAT | CreationFlags::O_TRUNC).bits();
+    self::do_open(path, flags, mode)
+}
+
+pub fn do_open(path: *const i8, flags: u32, mode: u16) -> Result<isize> {
     self::do_openat(AT_FDCWD, path, flags, mode)
 }
 
-pub fn do_openat(dirfd: i32, path: *const i8, flags: u32, mode: u32) -> Result<isize> {
+pub fn do_openat(dirfd: i32, path: *const i8, flags: u32, mode: u16) -> Result<isize> {
     let path = from_user::clone_cstring_safely(path)?
         .to_string_lossy()
         .into_owned();
     let fs_path = FsPath::new(&path, dirfd, false)?;
+    let mode = FileMode::from_bits_truncate(mode);
     let fd = file_ops::do_openat(&fs_path, flags, mode)?;
     Ok(fd as isize)
+}
+
+pub fn do_umask(mask: u16) -> Result<isize> {
+    let new_mask = FileMode::from_bits_truncate(mask).to_umask();
+    let old_mask = current!().process().set_umask(new_mask);
+    Ok(old_mask.bits() as isize)
 }
 
 pub fn do_close(fd: FileDesc) -> Result<isize> {
@@ -300,6 +375,12 @@ pub fn do_chdir(path: *const i8) -> Result<isize> {
     Ok(0)
 }
 
+pub fn do_fchdir(fd: FileDesc) -> Result<isize> {
+    let path = get_abs_path_by_fd(fd)?;
+    fs_ops::do_chdir(&path)?;
+    Ok(0)
+}
+
 pub fn do_getcwd(buf_ptr: *mut u8, size: usize) -> Result<isize> {
     let buf = {
         from_user::check_mut_array(buf_ptr, size)?;
@@ -307,14 +388,15 @@ pub fn do_getcwd(buf_ptr: *mut u8, size: usize) -> Result<isize> {
     };
 
     let cwd = fs_ops::do_getcwd()?;
-
     if cwd.len() + 1 > buf.len() {
         return_errno!(ERANGE, "buf is not long enough");
     }
     buf[..cwd.len()].copy_from_slice(cwd.as_bytes());
-    buf[cwd.len()] = 0;
+    buf[cwd.len()] = b'\0';
 
-    Ok(buf.len() as isize)
+    // The user-level library returns the pointer of buffer, the kernel just returns
+    // the length of the buffer filled (which includes the ending '\0' character).
+    Ok((cwd.len() + 1) as isize)
 }
 
 pub fn do_rename(oldpath: *const i8, newpath: *const i8) -> Result<isize> {
@@ -339,15 +421,16 @@ pub fn do_renameat(
     Ok(0)
 }
 
-pub fn do_mkdir(path: *const i8, mode: usize) -> Result<isize> {
+pub fn do_mkdir(path: *const i8, mode: u16) -> Result<isize> {
     self::do_mkdirat(AT_FDCWD, path, mode)
 }
 
-pub fn do_mkdirat(dirfd: i32, path: *const i8, mode: usize) -> Result<isize> {
+pub fn do_mkdirat(dirfd: i32, path: *const i8, mode: u16) -> Result<isize> {
     let path = from_user::clone_cstring_safely(path)?
         .to_string_lossy()
         .into_owned();
     let fs_path = FsPath::new(&path, dirfd, false)?;
+    let mode = FileMode::from_bits_truncate(mode);
     file_ops::do_mkdirat(&fs_path, mode)?;
     Ok(0)
 }

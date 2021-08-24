@@ -42,7 +42,7 @@ enclave {
          *      EEXIST - The LibOS has already been initialized.
          *      EINVAL - The value of an argument are invalid.
          */
-        public int occlum_ecall_init([in, string] const char* log_level, [in, string] const char* instance_dir);
+        public int occlum_ecall_init([in, string] const char* log_level, [in, string] const char* instance_dir, [in, string] const char* resolv_conf_ptr);
 
         /*
          * Create a new LibOS process to do the task specified by the given 
@@ -146,6 +146,10 @@ enclave {
             [in] const struct timespec* req,
             [out] struct timespec* rem
         ) propagate_errno;
+
+        int occlum_ocall_timerfd_create(clockid_t clockid, int flags) propagate_errno;
+        int occlum_ocall_timerfd_settime(int fd, int flags, [in] const struct itimerspec* new_value, [out] struct itimerspec* old_value) propagate_errno;
+        int occlum_ocall_timerfd_gettime(int fd, [out] struct itimerspec* curr_value) propagate_errno;
 
         void occlum_ocall_sync(void);
 

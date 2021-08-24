@@ -7,11 +7,13 @@ use super::*;
 use crate::exception::*;
 use crate::fs::HostStdioFds;
 use crate::interrupt;
-use crate::process::ProcessFilter;
+use crate::process::idle_reap_zombie_children;
+use crate::process::{ProcessFilter, SpawnAttr};
 use crate::signal::SigNum;
 use crate::time::up_time::init;
 use crate::util::log::LevelFilter;
 use crate::util::mem_util::from_untrusted::*;
+use crate::util::resolv_conf_util::{parse_resolv_conf, write_resolv_conf};
 use crate::util::sgx::allow_debug as sgx_allow_debug;
 use sgx_tse::*;
 
@@ -23,6 +25,7 @@ lazy_static! {
     static ref HAS_INIT: AtomicBool = AtomicBool::new(false);
     pub static ref ENTRY_POINTS: RwLock<Vec<PathBuf>> =
         RwLock::new(config::LIBOS_CONFIG.entry_points.clone());
+    pub static ref RESOLV_CONF_STR: RwLock<Option<String>> = RwLock::new(None);
 }
 
 macro_rules! ecall_errno {
@@ -33,7 +36,11 @@ macro_rules! ecall_errno {
 }
 
 #[no_mangle]
-pub extern "C" fn occlum_ecall_init(log_level: *const c_char, instance_dir: *const c_char) -> i32 {
+pub extern "C" fn occlum_ecall_init(
+    log_level: *const c_char,
+    instance_dir: *const c_char,
+    resolv_conf_ptr: *const c_char,
+) -> i32 {
     if HAS_INIT.load(Ordering::SeqCst) == true {
         return ecall_errno!(EEXIST);
     }
@@ -86,6 +93,18 @@ pub extern "C" fn occlum_ecall_init(log_level: *const c_char, instance_dir: *con
         // Enable global backtrace
         unsafe { backtrace::enable_backtrace(&ENCLAVE_PATH, PrintFormat::Short) };
     });
+
+    match parse_resolv_conf(resolv_conf_ptr) {
+        Err(e) => {
+            error!("failed to parse /etc/resolv.conf: {}", e.backtrace());
+        }
+        Ok(resolv_conf_str) => {
+            *RESOLV_CONF_STR.write().unwrap() = Some(resolv_conf_str);
+            if let Err(e) = write_resolv_conf() {
+                error!("failed to write /etc/resolv.conf: {}", e.backtrace());
+            }
+        }
+    }
 
     0
 }
@@ -251,12 +270,21 @@ fn do_new_process(
     let file_actions = Vec::new();
     let current = &process::IDLE;
     let program_path_str = program_path.to_str().unwrap();
+
+    // Called from occlum_ecall_new_process, give it an identical process group.
+    // So that "occlum run/exec" process will have its own process group.
+    let spawn_attribute = {
+        let mut attribute = SpawnAttr::default();
+        attribute.process_group = Some(0);
+        attribute
+    };
+
     let new_tid = process::do_spawn_without_exec(
         &program_path_str,
         argv,
         &env_concat,
         &file_actions,
-        None,
+        Some(spawn_attribute),
         host_stdio_fds,
         current,
     )?;
@@ -265,6 +293,9 @@ fn do_new_process(
 
 fn do_exec_thread(libos_tid: pid_t, host_tid: pid_t) -> Result<i32> {
     let status = process::task::exec(libos_tid, host_tid)?;
+
+    // Idle process should reap all zombie children
+    idle_reap_zombie_children()?;
 
     // sync file system
     // TODO: only sync when all processes exit
